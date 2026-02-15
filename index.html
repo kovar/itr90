@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ITR 90 Vacuum Gauge</title>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/styles.css" />
+  <!-- Theme: inline to avoid flash -->
+  <script>
+    (function() {
+      var key = 'itr90-theme';
+      var stored = localStorage.getItem(key);
+      var theme = stored || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', theme);
+      if (!stored) localStorage.setItem(key, theme);
+
+      window._itr90ToggleTheme = function() {
+        var cur = document.documentElement.getAttribute('data-theme');
+        var next = cur === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', next);
+        localStorage.setItem(key, next);
+        var btn = document.getElementById('themeToggle');
+        if (btn) {
+          btn.textContent = next === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19';
+          btn.title = next === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+        }
+      };
+    })();
+  </script>
+  <!-- Chart.js + date adapter (pinned versions) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <script type="module" src="js/main.js"></script>
+</head>
+
+<body>
+  <!-- ── Toolbar ──────────────────────────────────────────── -->
+  <nav class="toolbar">
+    <!-- Connection -->
+    <div class="toolbar-group">
+      <span class="status-dot" id="statusDot"></span>
+      <button id="connectSerial">USB</button>
+      <button id="connectWs">Bridge</button>
+      <input type="text" id="wsUrl" class="ws-url-input" value="ws://localhost:8765" placeholder="ws://host:port" />
+      <button id="disconnect" disabled>Disconnect</button>
+    </div>
+
+    <!-- Gauge commands -->
+    <div class="toolbar-group">
+      <button id="unitMbar" data-requires-connection disabled>mbar</button>
+      <button id="unitTorr" data-requires-connection disabled>Torr</button>
+      <button id="unitPa" data-requires-connection disabled>Pa</button>
+    </div>
+
+    <div class="toolbar-group">
+      <button id="degasOn" data-requires-connection disabled>Degas On</button>
+      <button id="degasOff" data-requires-connection disabled>Degas Off</button>
+    </div>
+
+    <!-- Recording -->
+    <div class="toolbar-group">
+      <button id="startRecord" data-requires-connection disabled>Record</button>
+      <button id="stopRecord" disabled>Save</button>
+    </div>
+
+    <!-- Sampling rate -->
+    <div class="toolbar-group">
+      <div class="sampling-inline">
+        <span class="unit-label">Interval</span>
+        <input type="number" id="samplingRate" value="1000" min="20" step="100" />
+        <span class="unit-label">ms</span>
+      </div>
+    </div>
+
+    <div class="toolbar-spacer"></div>
+
+    <!-- Demo + Theme toggle -->
+    <button id="demo">Demo</button>
+    <button class="theme-toggle" id="themeToggle" onclick="_itr90ToggleTheme()" title="Toggle theme">&#127769;</button>
+    <script>
+      (function() {
+        var d = document.documentElement.getAttribute('data-theme') === 'dark';
+        var b = document.getElementById('themeToggle');
+        if (b) { b.textContent = d ? '\u2600\uFE0F' : '\uD83C\uDF19'; b.title = d ? 'Switch to light mode' : 'Switch to dark mode'; }
+      })();
+    </script>
+  </nav>
+
+  <!-- ── Main Content ─────────────────────────────────────── -->
+  <main class="main-content">
+    <!-- Live Readout -->
+    <div class="readout">
+      <div>
+        <span class="readout-value" id="readoutValue">---</span>
+        <span class="readout-unit" id="readoutUnit"></span>
+      </div>
+      <div class="readout-time" id="readoutTime"></div>
+    </div>
+
+    <!-- Gauge Status Bar -->
+    <div class="gauge-status-bar">
+      <div class="gauge-status-item">
+        <span class="status-label">Emission</span>
+        <span class="status-value" id="emissionState">---</span>
+      </div>
+      <div class="gauge-status-item">
+        <span class="status-label">Error</span>
+        <span class="status-value" id="errorState">---</span>
+      </div>
+      <div class="gauge-status-item">
+        <span class="status-label">Firmware</span>
+        <span class="status-value" id="firmwareVersion">---</span>
+      </div>
+    </div>
+
+    <!-- Stats Bar -->
+    <div class="stats-bar">
+      <div class="stat-item">
+        <div class="stat-label">Min</div>
+        <div class="stat-value" id="statMin">---</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">Max</div>
+        <div class="stat-value" id="statMax">---</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">Avg</div>
+        <div class="stat-value" id="statMean">---</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">Count</div>
+        <div class="stat-value" id="statCount">0</div>
+      </div>
+    </div>
+
+    <!-- Chart -->
+    <div class="chart-section">
+      <div class="chart-controls">
+        <label for="timeRange">Window</label>
+        <select id="timeRange">
+          <option value="30">30 s</option>
+          <option value="60">1 min</option>
+          <option value="300" selected>5 min</option>
+          <option value="600">10 min</option>
+          <option value="1800">30 min</option>
+        </select>
+        <label for="yMin">Y Min</label>
+        <input type="text" id="yMin" placeholder="Auto" />
+        <label for="yMax">Y Max</label>
+        <input type="text" id="yMax" placeholder="Auto" />
+        <button id="resetZoom">Reset</button>
+        <button id="clearChart">Clear</button>
+      </div>
+      <div class="chart-wrapper">
+        <canvas id="chartCanvas"></canvas>
+      </div>
+    </div>
+
+    <!-- How to Use -->
+    <details open>
+      <summary>How to Use</summary>
+      <div class="details-content help-content">
+        <h4>1. Connect to your gauge</h4>
+        <dl>
+          <dt>USB (Chrome/Edge only)</dt>
+          <dd>Click <strong>USB</strong> and select your serial port. The ITR 90 streams data continuously at ~50 Hz &mdash; no polling needed.</dd>
+          <dt>Bridge (any browser)</dt>
+          <dd>Start the bridge: <code>uv run bridge.py</code>, then click <strong>Bridge</strong>. This relays binary data over WebSocket.</dd>
+        </dl>
+
+        <h4>2. Toolbar buttons</h4>
+        <dl>
+          <dt>mbar / Torr / Pa</dt>
+          <dd>Switch the display unit on the gauge. The change takes effect immediately.</dd>
+          <dt>Degas On / Off</dt>
+          <dd>Control the Bayard-Alpert degas function. Only use when pressure is below ~10<sup>-5</sup> mbar.</dd>
+          <dt>Record / Save</dt>
+          <dd><strong>Record</strong> begins capturing readings at ~1 Hz. <strong>Save</strong> stops and downloads a CSV.</dd>
+        </dl>
+
+        <h4>3. Chart</h4>
+        <p>Logarithmic Y-axis covers the full range (5&times;10<sup>-10</sup> to 1000 mbar). <strong>Window</strong> sets visible history. <strong>Y Min/Max</strong> accepts scientific notation (e.g. <code>1e-8</code>).</p>
+
+        <h4>4. Demo mode</h4>
+        <p>Click <strong>Demo</strong> to simulate a pump-down curve without hardware.</p>
+
+        <h4>5. Typical workflow</h4>
+        <p>Connect &rarr; data streams automatically &rarr; click <strong>Record</strong> to capture &rarr; click <strong>Save</strong> to download CSV.</p>
+
+        <h4>Running locally</h4>
+        <p>Run <code>uv run serve.py</code> and open <strong>http://localhost:8001</strong>. Don't open <code>index.html</code> directly.</p>
+      </div>
+    </details>
+
+    <!-- Log -->
+    <details>
+      <summary>Log</summary>
+      <div class="details-content">
+        <pre class="log-output" id="logOutput"></pre>
+      </div>
+    </details>
+
+    <!-- Protocol Reference -->
+    <details>
+      <summary>ITR 90 Protocol Reference</summary>
+      <div class="details-content">
+        <h4>Output Frame (gauge &rarr; host): 9 bytes, continuous at ~50 Hz</h4>
+        <table>
+          <thead>
+            <tr><th>Byte</th><th>Function</th><th>Value</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>0</td><td>Length</td><td>7 (fixed)</td></tr>
+            <tr><td>1</td><td>Page number</td><td>5 (ITR 90)</td></tr>
+            <tr><td>2</td><td>Status</td><td>emission, unit, toggle, 1000 mbar adj</td></tr>
+            <tr><td>3</td><td>Error</td><td>Pirani / BA error flags</td></tr>
+            <tr><td>4</td><td>Measurement high</td><td>0&ndash;255</td></tr>
+            <tr><td>5</td><td>Measurement low</td><td>0&ndash;255</td></tr>
+            <tr><td>6</td><td>Software version</td><td>version &times; 20</td></tr>
+            <tr><td>7</td><td>Sensor type</td><td>10 (ITR 90)</td></tr>
+            <tr><td>8</td><td>Checksum</td><td>low byte of sum(bytes 1&ndash;7)</td></tr>
+          </tbody>
+        </table>
+
+        <h4>Pressure Calculation</h4>
+        <p><code>p_mbar = 10^((high &times; 256 + low) / 4000 &minus; 12.5)</code></p>
+
+        <h4>Commands (host &rarr; gauge): 5 bytes</h4>
+        <table>
+          <thead>
+            <tr><th>Command</th><th>Bytes</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Set mbar</td><td>[3, 16, 62, 0, 78]</td></tr>
+            <tr><td>Set Torr</td><td>[3, 16, 62, 1, 79]</td></tr>
+            <tr><td>Set Pa</td><td>[3, 16, 62, 2, 80]</td></tr>
+            <tr><td>Save unit</td><td>[3, 32, 62, 62, 156]</td></tr>
+            <tr><td>Degas on</td><td>[3, 16, 93, 148, 1]</td></tr>
+            <tr><td>Degas off</td><td>[3, 16, 93, 105, 214]</td></tr>
+          </tbody>
+        </table>
+
+        <h4>Serial Config</h4>
+        <p>9600 baud, 8 data bits, 1 stop bit, no parity, no handshake.</p>
+      </div>
+    </details>
+  </main>
+
+  <!-- Toast notifications -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- Module load failure banner -->
+  <div id="moduleWarning" style="display:none; position:fixed; top:0; left:0; right:0; z-index:999;
+    background:#dc2626; color:#fff; padding:0.75rem 1rem; text-align:center; font-family:system-ui,sans-serif; font-size:0.9rem;">
+    App modules failed to load. You probably opened this file directly &mdash; ES modules require a web server.<br>
+    Run <strong style="font-family:monospace">uv run serve.py</strong> then open <strong>http://localhost:8001</strong>
+  </div>
+  <script>
+    window._itr90ModulesLoaded = false;
+    setTimeout(function() {
+      if (!window._itr90ModulesLoaded) {
+        document.getElementById('moduleWarning').style.display = 'block';
+      }
+    }, 2000);
+  </script>
+</body>
+
+</html>
