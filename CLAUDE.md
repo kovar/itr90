@@ -70,6 +70,10 @@ uv run serve.py     # starts http://localhost:8001 and opens browser
 uv run bridge.py                        # auto-detect serial port
 uv run bridge.py /dev/cu.usbserial-10   # specify port
 ```
+Dependencies (`pyserial`, `websockets`, `influxdb-client`) are declared inline via PEP 723 — `uv` installs them automatically.
+
+**Optional InfluxDB logging:**
+The bridge can optionally log pressure readings to InfluxDB 2.x. At startup it prompts `Enable InfluxDB logging? [y/N]` — answering N (or pressing Enter) skips it entirely. If enabled, it parses ITR 90 binary frames in a side buffer and writes points with `fields={pressure_mbar: float}` using the batching `WriteApi`. Writes are throttled to ~1/sec (the gauge streams at 50 Hz). Raw bytes are still relayed unchanged to the WebSocket.
 
 ## Performance
 
