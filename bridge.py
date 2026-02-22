@@ -18,7 +18,7 @@ Usage:
     uv run bridge.py /dev/cu.usbserial-10   # specify port
     uv run bridge.py COM3                   # Windows
 
-The web app connects to ws://localhost:8765 (default).
+The web app connects to ws://localhost:8766 (default).
 """
 
 import asyncio
@@ -33,25 +33,65 @@ import websockets
 
 BAUD_RATE = 9600
 WS_HOST = "localhost"
-WS_PORT = 8765
+WS_PORT = 8766
 FRAME_LENGTH = 9
+
+# ─────────────────────────────────────────────────────────────────────────────
+# USER CONFIGURATION
+# Hard-code values here to skip the interactive prompts at startup.
+# Leave a field as None to be prompted interactively.
+# ─────────────────────────────────────────────────────────────────────────────
+SERIAL_PORT          = None   # e.g. "/dev/ttyUSB1" or "/dev/serial/by-id/usb-..."
+INFLUXDB_URL         = None   # e.g. "http://localhost:8086"
+INFLUXDB_ORG         = None   # e.g. "my-org"
+INFLUXDB_BUCKET      = None   # e.g. "sensors"
+INFLUXDB_TOKEN       = None   # e.g. "my-token=="
+INFLUXDB_MEASUREMENT = None   # e.g. "itr90_chamber1"
+# ─────────────────────────────────────────────────────────────────────────────
 
 # InfluxDB state (set by setup_influxdb)
 _influx = None  # dict with write_api, bucket, org, measurement, client
 _last_influx_write = 0.0  # monotonic timestamp for throttling
 
 
+def _is_usb_port(p):
+    """Return True if this port looks like a USB serial device.
+
+    Checks VID/PID first (most reliable), then falls back to device name
+    patterns for systems where pyserial doesn't populate VID/PID from sysfs.
+    USB serial devices on Linux appear as /dev/ttyUSB* or /dev/ttyACM*;
+    on macOS as /dev/cu.usbserial-* or /dev/cu.usbmodem*.
+    """
+    if p.vid is not None:
+        return True
+    name = p.device.lower()
+    return any(s in name for s in ("ttyusb", "ttyacm", "cu.usb", "cu.wch"))
+
+
 def find_serial_port():
-    """List available serial ports. If more than one, prompt the user to pick."""
-    ports = list(serial.tools.list_ports.comports())
-    if not ports:
+    """List available USB serial ports, preferring USB devices.
+
+    The ITR 90 connects via USB and presents a virtual serial port.
+    We show only USB ports by default and fall back to all ports if none found.
+    """
+    all_ports = list(serial.tools.list_ports.comports())
+    if not all_ports:
         return None
+
+    usb_ports = [p for p in all_ports if _is_usb_port(p)]
+    ports = usb_ports if usb_ports else all_ports
+    if not usb_ports:
+        print("No USB serial devices found — showing all ports:")
+
     if len(ports) == 1:
-        print(f"Found serial port: {ports[0].device}  —  {ports[0].description}")
+        tag = " [USB]" if _is_usb_port(ports[0]) else ""
+        print(f"Found serial port: {ports[0].device}{tag}  —  {ports[0].description}")
         return ports[0].device
-    print("Multiple serial ports found:\n")
+
+    print("USB serial devices found:\n")
     for i, p in enumerate(ports, 1):
-        print(f"  [{i}]  {p.device}  —  {p.description}")
+        vid_pid = f"  VID:PID={p.vid:04X}:{p.pid:04X}" if p.vid is not None else ""
+        print(f"  [{i}]  {p.device}  —  {p.description}{vid_pid}")
     print()
     while True:
         try:
@@ -66,41 +106,57 @@ def find_serial_port():
 
 def open_serial(port_name):
     """Open serial port with ITR 90 settings (9600 8N1)."""
-    return serial.Serial(
-        port=port_name,
-        baudrate=BAUD_RATE,
-        bytesize=serial.EIGHTBITS,
-        stopbits=serial.STOPBITS_ONE,
-        parity=serial.PARITY_NONE,
-        timeout=0.1,
-    )
+    try:
+        return serial.Serial(
+            port=port_name,
+            baudrate=BAUD_RATE,
+            bytesize=serial.EIGHTBITS,
+            stopbits=serial.STOPBITS_ONE,
+            parity=serial.PARITY_NONE,
+            timeout=0.1,
+            exclusive=True,
+        )
+    except serial.SerialException as e:
+        print(f"Cannot open {port_name}: {e}")
+        print("Is another bridge already using this port?")
+        sys.exit(1)
 
 
 def setup_influxdb():
     """Interactively configure InfluxDB logging. Returns config dict or None."""
     global _influx
-    try:
-        answer = input("\nEnable InfluxDB logging? [y/N]: ").strip().lower()
-    except EOFError:
-        return None
-    if answer != "y":
-        return None
+
+    # Use pre-configured values if all USER CONFIGURATION fields are set
+    if all([INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXDB_TOKEN, INFLUXDB_MEASUREMENT]):
+        url = INFLUXDB_URL
+        org = INFLUXDB_ORG
+        bucket = INFLUXDB_BUCKET
+        token = INFLUXDB_TOKEN
+        measurement = INFLUXDB_MEASUREMENT
+        print(f"\nUsing pre-configured InfluxDB: {org}/{bucket}/{measurement}")
+    else:
+        try:
+            answer = input("\nEnable InfluxDB logging? [y/N]: ").strip().lower()
+        except EOFError:
+            return None
+        if answer != "y":
+            return None
+
+        print("\n── InfluxDB Setup ──────────────────────────────────")
+        url = input("URL [http://localhost:8086]: ").strip() or "http://localhost:8086"
+        org = input("Organization: ").strip()
+        bucket = input("Bucket: ").strip()
+        print("API Token")
+        print("  (Find yours at: InfluxDB UI → Load Data → API Tokens)")
+        token = getpass.getpass("  Token: ")
+        measurement = input("Measurement name: ").strip()
+        print("  Use snake_case, e.g. itr90_chamber1")
+
+        if not all([org, bucket, token, measurement]):
+            print("Missing required fields — InfluxDB logging disabled.")
+            return None
 
     from influxdb_client import InfluxDBClient
-
-    print("\n── InfluxDB Setup ──────────────────────────────────")
-    url = input("URL [http://localhost:8086]: ").strip() or "http://localhost:8086"
-    org = input("Organization: ").strip()
-    bucket = input("Bucket: ").strip()
-    print("API Token")
-    print("  (Find yours at: InfluxDB UI → Load Data → API Tokens)")
-    token = getpass.getpass("  Token: ")
-    measurement = input("Measurement name: ").strip()
-    print("  Use snake_case, e.g. itr90_chamber1")
-
-    if not all([org, bucket, token, measurement]):
-        print("Missing required fields — InfluxDB logging disabled.")
-        return None
 
     print("\nTesting connection... ", end="", flush=True)
     client = InfluxDBClient(url=url, token=token, org=org)
@@ -219,7 +275,11 @@ async def serial_to_ws(ser, ws):
     loop = asyncio.get_event_loop()
     parse_buf = b""
     while True:
-        data = await loop.run_in_executor(None, ser.read, 256)
+        try:
+            data = await loop.run_in_executor(None, ser.read, 256)
+        except serial.SerialException as e:
+            print(f"\n  Serial read error: {e}")
+            return
         if data:
             try:
                 await ws.send(data)
@@ -240,7 +300,11 @@ async def ws_to_serial(ser, ws):
     try:
         async for message in ws:
             if isinstance(message, bytes) and message:
-                ser.write(message)
+                try:
+                    ser.write(message)
+                except serial.SerialException as e:
+                    print(f"\n  Serial write error: {e}")
+                    return
                 print(f"  → Sent to gauge: [{', '.join(str(b) for b in message)}]")
     except websockets.ConnectionClosed:
         pass
@@ -260,7 +324,13 @@ async def handler(ws, ser):
 
 
 async def main():
-    port_name = sys.argv[1] if len(sys.argv) > 1 else find_serial_port()
+    if len(sys.argv) > 1:
+        port_name = sys.argv[1]
+    elif SERIAL_PORT:
+        port_name = SERIAL_PORT
+        print(f"Using pre-configured serial port: {port_name}")
+    else:
+        port_name = find_serial_port()
     if not port_name:
         print("No serial ports found. Connect a gauge and try again,")
         print("or specify the port: uv run bridge.py /dev/cu.usbserial-10")
