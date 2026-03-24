@@ -491,11 +491,12 @@ def write_influx_pressure(pressure_mbar):
         return
     _last_influx_write = now
 
-    from influxdb_client import Point
+    from influxdb_client import Point, WritePrecision
 
     point = (
         Point(_influx["measurement"])
         .field("pressure_mbar", pressure_mbar)
+        .time(datetime.datetime.now(datetime.timezone.utc), WritePrecision.MILLISECONDS)
     )
     try:
         _influx["write_api"].write(
